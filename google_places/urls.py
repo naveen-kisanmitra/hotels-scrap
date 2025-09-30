@@ -37,6 +37,7 @@ urlpatterns = [
     path('api/search/address/', views.AddressSearchAPI.as_view(), name='api-search-address'),
     path('api/search/location/', views.LocationSearchAPI.as_view(), name='api-search-location'),
     path('api/search/permission/', views.LocationPermissionAPI.as_view(), name='api-search-permission'),
+    path('api/search/labor/', views.AgriculturalLaborSearchAPI.as_view(), name='api-search-labor'),
     path('geocode/', views.GoogleGeocodingView.as_view(), name='geocode'),
     path('health/', health.HealthCheckView.as_view(), name='health-check'),
         path('api/location/', views.location_api, name='location_api'),

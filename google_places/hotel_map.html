@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Place Search Map</title>
+    <title>Labour & Hotel Search Map</title>
     <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
     <style>
         #map { 
@@ -305,7 +305,7 @@
             <div class="loading-info"></div>
         </div>
     </div>
-    <h2>Place Search Map</h2>
+    <h2>Labour & Place Search Map</h2>
     <div id="searchContainer">
         <button type="button" id="useMyLocationBtn" style="background-color:#007bff; color:white; margin-right:10px;">Use My Location</button>
         <label>Location: <input type="text" id="locationInput" placeholder="Enter city, address, or area name" required></label>
@@ -315,6 +315,15 @@
                 <option value="restaurants">Restaurants</option>
                 <option value="mess">Mess</option>
                 <option value="canteens">Canteens</option>
+                <option value="labour supplier">Labour Supplier</option>
+                <option value="labour agency">Labour Agency</option>
+                <option value="labour provider">Labour Provider</option>
+                <option value="manpower supplier">Manpower Supplier</option>
+                <option value="manpower agency">Manpower Agency</option>
+                <option value="labour contractor service">Labour Contractor Service</option>
+                <option value="workforce supplier">Workforce Supplier</option>
+                <option value="agricultural labour contractor">Agricultural Labour Contractor</option>
+                <option value="farm labour contractor">Farm Labour Contractor</option>
             </select>
         </label>
         <button type="button" id="searchButton" onclick="handleSearch()">Search</button>
@@ -810,16 +819,40 @@
             const searchButton = document.getElementById('searchButton');
             const category = document.getElementById('categoryInput').value;
             
+            // Determine which endpoint to use based on category
+            let baseUrl;
+            const laborCategories = [
+                'agricultural labor contractors',
+                'farm labor contractors',
+                'migrant labor services',
+                'seasonal workers',
+                'grape harvest labor',
+                'agricultural recruitment agencies',
+                'labor contractors',
+                'manpower agencies',
+                'temporary staffing agencies',
+                'employment agencies',
+                'labour supplier',
+                'labour agency',
+                'labour provider',
+                'manpower supplier',
+                'manpower agency',
+                'labour contractor service',
+                'workforce supplier',
+                'agricultural labour contractor',
+                'farm labour contractor'
+            ];
+            
+            if (laborCategories.includes(category)) {
+                baseUrl = 'https://hotels-scrap-kisanmitra.onrender.com/api/search/labor/';
+            } else {
+                baseUrl = 'https://hotels-scrap-kisanmitra.onrender.com/search/';
+            }
+            
             // Initialize a progress animation with smooth transition
             let progress = 0;
+            let progressInterval;
             loadingBar.style.transition = 'width 0.5s ease-in-out';
-            const progressInterval = setInterval(() => {
-                if (progress < 90) {  // Only go up to 90% automatically
-                    // Smaller, more consistent increments
-                    progress += 0.5;
-                    loadingBar.style.width = `${Math.min(progress, 90)}%`;
-                }
-            }, 300);
             
             try {
                 // Show initial loading state
@@ -836,20 +869,7 @@
                     </div>
                 `;
                 
-                const queryParams = new URLSearchParams({
-                    latitude: params.latitude,
-                    longitude: params.longitude,
-                    category: category,  // Add category parameter
-                    ...(params.area_size && { area_size: params.area_size }),
-                    ...(params.grid_size && { grid_size: params.grid_size }),
-                    ...(params.overlap && { overlap: params.overlap })
-                });
-                // Show loading overlay with initial message
-                loadingOverlay.style.display = 'flex';
-                searchButton.disabled = true;
-                
                 // Initialize loading animation with status updates
-                let progress = 0;
                 let searchPhase = 0;
                 const phases = [
                     'Initializing search...',
@@ -862,7 +882,7 @@
                 // Set smooth transition for the loading bar
                 loadingBar.style.transition = 'width 0.5s ease-in-out';
                 
-                const progressInterval = setInterval(() => {
+                progressInterval = setInterval(() => {
                     // Smaller increments for smoother animation
                     progress += 0.5;
                     if (progress <= 90) {
@@ -897,7 +917,7 @@
                     grid_size: params.grid_size,
                     overlap: params.overlap
                 });
-                const url = `https://hotels-scrap-kisanmitra.onrender.com/search/?${searchParams.toString()}`;                  console.log('Making API request to:', url); // Debug log
+                const url = `${baseUrl}?${searchParams.toString()}`;                  console.log('Making API request to:', url); // Debug log
                 
                 // Start the fetch with timeout for better user feedback
                 const startTime = Date.now();
@@ -1059,7 +1079,7 @@
             geocodeStatus.textContent = 'Finding location...';
             
             try {
-                // First geocode the location
+                // First geocoding the location
                 const location = await geocodeLocation(locationInput);
                 console.log('Geocoded location:', location); // Debug log
                 
@@ -1068,16 +1088,36 @@
                 
                 console.log('Starting search with location:', location);
                 
-                // Initialize map with coordinates
-                initMap(location.lat, location.lng, 13); // Use zoom level 13 for city view
-                
                 // Prepare search parameters with location and area info
+                // Use larger search area for labor search
+                const isLaborCategory = [
+                    'agricultural labor contractors',
+                    'farm labor contractors',
+                    'migrant labor services',
+                    'seasonal workers',
+                    'grape harvest labor',
+                    'agricultural recruitment agencies',
+                    'labor contractors',
+                    'manpower agencies',
+                    'temporary staffing agencies',
+                    'employment agencies',
+                    'labour supplier',
+                    'labour agency',
+                    'labour provider',
+                    'manpower supplier',
+                    'manpower agency',
+                    'labour contractor service',
+                    'workforce supplier',
+                    'agricultural labour contractor',
+                    'farm labour contractor'
+                ].includes(category);
+                
                 const searchParams = {
                     latitude: location.lat,
                     longitude: location.lng,
-                    area_size: location.areaInfo?.area_size || 5000,   // 5km radius like your working code
+                    area_size: isLaborCategory ? 15000 : (location.areaInfo?.area_size || 5000),   // 15km for labor, 5km for others
                     grid_size: location.areaInfo?.grid_size || 3,      // 3x3 grid for better coverage
-                    overlap: location.areaInfo?.overlap || 0.4         // 40% overlap for better performance
+                    overlap: isLaborCategory ? 0.6 : (location.areaInfo?.overlap || 0.4)         // 60% overlap for labor, 40% for others
                 };
                 
                 await fetchAndDisplayHotels(searchParams);
