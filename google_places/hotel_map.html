@@ -817,37 +817,10 @@
             const loadingInfo = document.querySelector('.loading-info');
             const loadingBar = document.querySelector('.loading-bar');
             const searchButton = document.getElementById('searchButton');
-            const category = document.getElementById('categoryInput').value;
+            const category = params.category || document.getElementById('categoryInput').value;
             
-            // Determine which endpoint to use based on category
-            let baseUrl;
-            const laborCategories = [
-                'agricultural labor contractors',
-                'farm labor contractors',
-                'migrant labor services',
-                'seasonal workers',
-                'grape harvest labor',
-                'agricultural recruitment agencies',
-                'labor contractors',
-                'manpower agencies',
-                'temporary staffing agencies',
-                'employment agencies',
-                'labour supplier',
-                'labour agency',
-                'labour provider',
-                'manpower supplier',
-                'manpower agency',
-                'labour contractor service',
-                'workforce supplier',
-                'agricultural labour contractor',
-                'farm labour contractor'
-            ];
-            
-            if (laborCategories.includes(category)) {
-                baseUrl = 'https://hotels-scrap-kisanmitra.onrender.com/api/search/labor/';
-            } else {
-                baseUrl = 'https://hotels-scrap-kisanmitra.onrender.com/search/';
-            }
+            // Use the consolidated API endpoint for all searches
+            const baseUrl = 'https://hotels-scrap-kisanmitra.onrender.com/api/search/';
             
             // Initialize a progress animation with smooth transition
             let progress = 0;
@@ -865,7 +838,7 @@
                     <div style="text-align: left; margin-top: 15px;">
                         <div>🎯 Searching: ${category.toUpperCase()}</div>
                         <div>📍 Area Center: ${params.latitude.toFixed(6)}, ${params.longitude.toFixed(6)}</div>
-                        <div>🔍 Searching all places in this area...</div>
+                        <div>🔍 Search area: ${(params.area_size/1000).toFixed(1)}km with ${params.grid_size}x${params.grid_size} grid</div>
                     </div>
                 `;
                 
@@ -896,28 +869,21 @@
                     }
                 }, 300);
 
-                // Show search parameters
-                loadingInfo.innerHTML = `
-                    <div style="text-align: left; margin-top: 15px;">
-                        <div>🎯 Searching: ${category.toUpperCase()}</div>
-                        <div>📍 Area Center: ${params.latitude.toFixed(6)}, ${params.longitude.toFixed(6)}</div>
-                        <div>🔍 Search area: ${(params.area_size/1000).toFixed(1)}km with ${params.grid_size}x${params.grid_size} grid</div>
-                    </div>
-                `;
-
                 // Update initial loading status
                 loadingStatus.textContent = `Searching for all ${category} in this area...`;
                 loadingInfo.textContent = 'Connecting to server...';
                 
-                // Construct search URL with all parameters
+                // Construct search URL with all parameters including category
                 const searchParams = new URLSearchParams({
                     latitude: params.latitude,
                     longitude: params.longitude,
+                    category: category,
                     area_size: params.area_size,
                     grid_size: params.grid_size,
                     overlap: params.overlap
                 });
-                const url = `${baseUrl}?${searchParams.toString()}`;                  console.log('Making API request to:', url); // Debug log
+                const url = `${baseUrl}?${searchParams.toString()}`;
+                console.log('Making API request to:', url); // Debug log
                 
                 // Start the fetch with timeout for better user feedback
                 const startTime = Date.now();
@@ -1018,7 +984,7 @@
             geocodeStatus.textContent = 'Geocoding address...';
             
             try {
-                                const response = await fetch(`https://hotels-scrap-kisanmitra.onrender.com/geocode/?address=${encodeURIComponent(address)}`);  
+                const response = await fetch(`https://hotels-scrap-kisanmitra.onrender.com/geocode/?address=${encodeURIComponent(address)}`);  
                 const data = await response.json();
 
                 if (!response.ok) {
@@ -1091,16 +1057,6 @@
                 // Prepare search parameters with location and area info
                 // Use larger search area for labor search
                 const isLaborCategory = [
-                    'agricultural labor contractors',
-                    'farm labor contractors',
-                    'migrant labor services',
-                    'seasonal workers',
-                    'grape harvest labor',
-                    'agricultural recruitment agencies',
-                    'labor contractors',
-                    'manpower agencies',
-                    'temporary staffing agencies',
-                    'employment agencies',
                     'labour supplier',
                     'labour agency',
                     'labour provider',
@@ -1115,6 +1071,7 @@
                 const searchParams = {
                     latitude: location.lat,
                     longitude: location.lng,
+                    category: category,  // Include category in the search parameters
                     area_size: isLaborCategory ? 15000 : (location.areaInfo?.area_size || 5000),   // 15km for labor, 5km for others
                     grid_size: location.areaInfo?.grid_size || 3,      // 3x3 grid for better coverage
                     overlap: isLaborCategory ? 0.6 : (location.areaInfo?.overlap || 0.4)         // 60% overlap for labor, 40% for others
@@ -1150,6 +1107,7 @@
                     const searchParams = {
                         latitude: lat,
                         longitude: lng,
+                        category: category,  // Include category in the search parameters
                         area_size: 5000,
                         grid_size: 3,
                         overlap: 0.4

@@ -2,6 +2,7 @@
 import os
 import requests
 import math
+import hashlib
 from datetime import datetime
 from typing import Dict
 from django.core.cache import cache
@@ -11,6 +12,8 @@ from rest_framework import status
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 import json
+
+# ...existing code...
 
 @csrf_exempt
 def location_api(request):
@@ -99,7 +102,7 @@ class GooglePlacesHotelSearchView(APIView):
         current_opening_hours = details.get('currentOpeningHours', {}) if details else None
         is_open = current_opening_hours.get('openNow') if current_opening_hours else None
         return {
-            'place_id': place['id'],
+            'place_id': place.get('place_id') or place.get('id'),
             'name': place.get('displayName', {}).get('text', 'Unnamed Place'),
             'formatted_address': full_address,
             'location': {
@@ -169,12 +172,15 @@ class GooglePlacesHotelSearchView(APIView):
                 for i in range(grid_size):
                     for j in range(grid_size):
                         try:
-                            cache_key = f'places_search_{lat}_{lng}_{area_size_meters}_{category}_{keyword}_{i}_{j}'
+                            # Build a memcache-safe key by hashing the raw composite key
+                            raw_key_base = f'places_search_{lat}_{lng}_{area_size_meters}_{category}_{keyword}_{i}_{j}'
+                            cache_key = 'ps_' + hashlib.sha1(raw_key_base.encode('utf-8')).hexdigest()
                             cached_results = cache.get(cache_key)
                             if cached_results:
                                 for place in cached_results:
-                                    if place['place_id'] not in places:
-                                        places[place['place_id']] = place
+                                    pid = place.get('place_id') or place.get('id')
+                                    if pid and pid not in places:
+                                        places[pid] = place
                                 continue
                             offset_x = step_meters * (i - grid_size // 2)
                             offset_y = step_meters * (j - grid_size // 2)
@@ -204,16 +210,26 @@ class GooglePlacesHotelSearchView(APIView):
                             )
                             print('DEBUG: Raw Google Places API response:', data)
                             if not data or 'places' not in data:
-                                cache.set(cache_key, [], timeout=3600)
+                                try:
+                                    cache.set(cache_key, [], timeout=3600)
+                                except Exception as ce:
+                                    print(f"Cache set failed for key {cache_key}: {ce}")
                                 continue
                             cell_places = []
                             for place in data['places']:
-                                place_id = place.get('id')
-                                if place_id and place_id not in places:
+                                place_id = place.get('place_id') or place.get('id')
+                                if not place_id:
+                                    # Log and skip places without id
+                                    print(f"Skipping place with missing id in response for keyword={keyword} cell={i},{j}: {place}")
+                                    continue
+                                if place_id not in places:
                                     formatted_place = self.format_place_data(place, None)
                                     places[place_id] = formatted_place
                                     cell_places.append(formatted_place)
-                            cache.set(cache_key, cell_places, timeout=3600)
+                            try:
+                                cache.set(cache_key, cell_places, timeout=3600)
+                            except Exception as ce:
+                                print(f"Cache set failed for key {cache_key}: {ce}")
                         except Exception as e:
                             print(f"Error in grid cell {i},{j} for keyword {keyword}: {str(e)}")
                             continue
@@ -237,6 +253,8 @@ class GooglePlacesHotelSearchView(APIView):
         except Exception as e:
             print(f"perform_search error: {str(e)}")
             return {"error": str(e)}
+
+# ...existing code...
 
 # Add new endpoints after all base classes
 class AddressSearchAPI(GooglePlacesHotelSearchView):
@@ -480,213 +498,3 @@ class GoogleGeocodingView(APIView):
                 {"error": f"Failed to geocode address: {str(e)}"}, 
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
-
-
-class AgriculturalLaborSearchView(GooglePlacesHotelSearchView):
-    """Specialized view for agricultural labor search with optimized keywords and parameters."""
-    
-    def perform_search(self, lat: float, lng: float, category: str = 'labour contractor', 
-                       area_size_meters: int = 15000, grid_size: int = 3, overlap: float = 0.6, 
-                       max_results_per_cell: int = 20) -> Dict:
-        """
-        Perform search optimized for agricultural labor with larger search area and different keywords.
-        """
-        try:
-            # Use specialized keywords for agricultural labor search
-            keywords = self._get_labor_keywords(category)
-            
-            earth_radius = 6378137
-            step_meters = area_size_meters * (1 - overlap) * 2 / grid_size
-            
-            def offset_lat(d):
-                return (d / earth_radius) * (180 / math.pi)
-                
-            def offset_lng(d, lat0):
-                return (d / (earth_radius * math.cos(math.pi * lat0 / 180))) * (180 / math.pi)
-                
-            places = {}
-            url = 'https://places.googleapis.com/v1/places:searchText'
-            api_key = os.getenv('GOOGLE_PLACES_API_KEY')
-            
-            search_headers = {
-                'Content-Type': 'application/json',
-                'X-Goog-Api-Key': api_key,
-                'X-Goog-FieldMask': 'places.id,places.displayName,places.formattedAddress,places.location,'
-                                  'places.rating,places.userRatingCount,places.types,places.nationalPhoneNumber,'
-                                  'places.websiteUri,places.priceLevel,places.businessStatus,places.shortFormattedAddress,'
-                                  'places.currentOpeningHours'
-            }
-            
-            for keyword in keywords:
-                for i in range(grid_size):
-                    for j in range(grid_size):
-                        try:
-                            cache_key = f'places_search_{lat}_{lng}_{area_size_meters}_{category}_{keyword}_{i}_{j}'
-                            cached_results = cache.get(cache_key)
-                            if cached_results:
-                                for place in cached_results:
-                                    if place['place_id'] not in places:
-                                        places[place['place_id']] = place
-                                continue
-                                
-                            offset_x = step_meters * (i - grid_size // 2)
-                            offset_y = step_meters * (j - grid_size // 2)
-                            lat_offset = offset_lat(offset_y)
-                            lng_offset = offset_lng(offset_x, lat)
-                            search_lat = lat + lat_offset
-                            search_lng = lng + lng_offset
-                            search_radius = int(step_meters * 0.7)
-                            
-                            payload = {
-                                'textQuery': keyword,
-                                'locationBias': {
-                                    'circle': {
-                                        'center': {
-                                            'latitude': search_lat,
-                                            'longitude': search_lng
-                                        },
-                                        'radius': search_radius
-                                    }
-                                },
-                                'maxResultCount': max_results_per_cell
-                            }
-                            
-                            data = self._make_request_with_retry(
-                                url=url,
-                                headers=search_headers,
-                                json=payload,
-                                method='post'
-                            )
-                            
-                            print('DEBUG: Raw Google Places API response:', data)
-                            if not data or 'places' not in data:
-                                cache.set(cache_key, [], timeout=3600)
-                                continue
-                                
-                            cell_places = []
-                            for place in data['places']:
-                                place_id = place.get('id')
-                                if place_id and place_id not in places:
-                                    formatted_place = self.format_place_data(place, None)
-                                    places[place['place_id']] = formatted_place
-                                    cell_places.append(formatted_place)
-                                    
-                            cache.set(cache_key, cell_places, timeout=3600)
-                        except Exception as e:
-                            print(f"Error in grid cell {i},{j} for keyword {keyword}: {str(e)}")
-                            continue
-                            
-            response_data = {
-                'results': list(places.values()),
-                'metadata': {
-                    'total_results': len(places),
-                    'search_parameters': {
-                        'latitude': lat,
-                        'longitude': lng,
-                        'area_size_km': area_size_meters / 1000,
-                        'cell_radius_m': int(step_meters / 2),
-                        'keywords': keywords,
-                        'grid_size': grid_size,
-                        'overlap': overlap
-                    },
-                    'timestamp': datetime.now().isoformat()
-                }
-            }
-            return response_data
-        except Exception as e:
-            print(f"perform_search error: {str(e)}")
-            return {"error": str(e)}
-
-    def _get_labor_keywords(self, category: str) -> list:
-        """Return optimized keywords for agricultural labor search."""
-        labor_keywords = [
-            'labour supplier',
-            'labour agency',
-            'labour provider',
-            'manpower supplier',
-            'manpower agency',
-            'labour contractor service',
-            'workforce supplier',
-            'agricultural labour contractor',
-            'farm labour contractor',
-            'agricultural labor contractors',
-            'farm labor contractors',
-            'migrant labor services',
-            'seasonal workers',
-            'grape harvest labor',
-            'agricultural recruitment agencies',
-            'labor contractors',
-            'manpower agencies',
-            'temporary staffing agencies',
-            'employment agencies',
-            'contract labor',
-            'agricultural workers'
-        ]
-        
-        # If a specific category is provided, use it as the primary keyword
-        if category and category != 'hotels':
-            # Put the specific category first, then the general labor keywords
-            return [category] + labor_keywords
-        
-        return labor_keywords
-
-
-class AgriculturalLaborSearchAPI(AgriculturalLaborSearchView):
-    """API endpoint specifically for agricultural labor search."""
-    
-    def get(self, request):
-        try:
-            address = request.query_params.get('address')
-            lat = request.query_params.get('latitude')
-            lng = request.query_params.get('longitude')
-            category = self._get_category_from_request(request)
-
-            area_size_param = request.query_params.get('area_size')
-            # Larger default area for labor search (15km instead of 5km)
-            area_size_meters = int(area_size_param) if area_size_param else 15000
-            grid_size = int(request.query_params.get('grid_size', 3))
-            overlap = float(request.query_params.get('overlap', 0.6))
-
-            # Mode 1: address provided, use geocoding
-            if address and not (lat and lng):
-                api_key = os.getenv('GOOGLE_PLACES_API_KEY')
-                if not api_key:
-                    return Response({'error': 'Google API key is not configured'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-                geocode_url = 'https://places.googleapis.com/v1/places:searchText'
-                headers = {
-                    'Content-Type': 'application/json',
-                    'X-Goog-Api-Key': api_key,
-                    'X-Goog-FieldMask': 'places.location,places.formattedAddress'
-                }
-                payload = {'textQuery': address}
-                data = self._make_request_with_retry(url=geocode_url, headers=headers, json=payload, method='post')
-                if not data or 'places' not in data or not data['places']:
-                    return Response({'error': 'Address geocoding failed or no location found'}, status=status.HTTP_404_NOT_FOUND)
-                place = data['places'][0]
-                location = place.get('location', {})
-                lat = location.get('latitude')
-                lng = location.get('longitude')
-                if lat is None or lng is None:
-                    return Response({'error': 'Failed to obtain coordinates from address'}, status=status.HTTP_404_NOT_FOUND)
-
-            # Mode 2: latitude and longitude provided, use directly
-            elif lat and lng:
-                try:
-                    lat = float(lat)
-                    lng = float(lng)
-                except ValueError:
-                    return Response({'error': 'Invalid latitude or longitude values.'}, status=status.HTTP_400_BAD_REQUEST)
-
-            # Neither address nor lat/lng provided
-            else:
-                return Response({'error': 'Provide either address or latitude and longitude.'}, status=status.HTTP_400_BAD_REQUEST)
-
-            response_data = self.perform_search(lat=lat, lng=lng, category=category,
-                                                area_size_meters=area_size_meters, grid_size=grid_size, overlap=overlap)
-            return Response(response_data)
-        except Exception as e:
-            print(f"Agricultural Labor API error: {str(e)}")
-            import traceback
-            traceback.print_exc()
-            return Response({'error': f'Agricultural labor search failed: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
