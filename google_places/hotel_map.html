@@ -822,6 +822,10 @@
             // Use the consolidated API endpoint for all searches
             const baseUrl = 'https://hotels-scrap-kisanmitra.onrender.com/api/search/';
             
+            // Debug logging
+            console.log('fetchAndDisplayHotels called with params:', params);
+            console.log('Using baseUrl:', baseUrl);
+            
             // Initialize a progress animation with smooth transition
             let progress = 0;
             let progressInterval;
@@ -884,6 +888,16 @@
                 });
                 const url = `${baseUrl}?${searchParams.toString()}`;
                 console.log('Making API request to:', url); // Debug log
+                
+                // Additional debug logging
+                console.log('Search parameters:', {
+                    latitude: params.latitude,
+                    longitude: params.longitude,
+                    category: category,
+                    area_size: params.area_size,
+                    grid_size: params.grid_size,
+                    overlap: params.overlap
+                });
                 
                 // Start the fetch with timeout for better user feedback
                 const startTime = Date.now();
@@ -1068,6 +1082,9 @@
                     'farm labour contractor'
                 ].includes(category);
                 
+                console.log('Is labor category:', isLaborCategory);
+                console.log('Selected category:', category);
+                
                 const searchParams = {
                     latitude: location.lat,
                     longitude: location.lng,
@@ -1076,6 +1093,8 @@
                     grid_size: location.areaInfo?.grid_size || 3,      // 3x3 grid for better coverage
                     overlap: isLaborCategory ? 0.6 : (location.areaInfo?.overlap || 0.4)         // 60% overlap for labor, 40% for others
                 };
+                
+                console.log('Search parameters:', searchParams);
                 
                 await fetchAndDisplayHotels(searchParams);
                 console.log('Search completed'); // Debug log
@@ -1097,6 +1116,8 @@
         // "Use My Location" button logic
         document.getElementById('useMyLocationBtn').onclick = async function() {
             const category = document.getElementById('categoryInput').value || 'hotels';
+            console.log('Use My Location clicked, category:', category);
+            
             if (navigator.geolocation) {
                 navigator.geolocation.getCurrentPosition(async function(position) {
                     const lat = position.coords.latitude;
@@ -1112,6 +1133,9 @@
                         grid_size: 3,
                         overlap: 0.4
                     };
+                    
+                    console.log('Use My Location search parameters:', searchParams);
+                    
                     await fetchAndDisplayHotels(searchParams);
                     document.getElementById('geocodeStatus').textContent = `Showing all results near your location.`;
                 }, function(error) {
