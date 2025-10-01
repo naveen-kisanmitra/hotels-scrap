@@ -13,8 +13,6 @@ from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 import json
 
-# ...existing code...
-
 @csrf_exempt
 def location_api(request):
     if request.method == 'POST':
@@ -168,6 +166,25 @@ class GooglePlacesHotelSearchView(APIView):
                                   'places.websiteUri,places.priceLevel,places.businessStatus,places.shortFormattedAddress,'
                                   'places.currentOpeningHours'
             }
+            
+            # Calculate search bounds for filtering results
+            half_area_km = area_size_meters / 2000  # Convert to km and divide by 2
+            lat_delta = half_area_km / 111.32  # Approximate km to lat degrees
+            lng_delta = half_area_km / (111.32 * math.cos(math.radians(lat)))  # Adjust for longitude
+            
+            search_bounds = {
+                'northeast': {
+                    'lat': lat + lat_delta,
+                    'lng': lng + lng_delta
+                },
+                'southwest': {
+                    'lat': lat - lat_delta,
+                    'lng': lng - lng_delta
+                }
+            }
+            
+            print(f"Search bounds: {search_bounds}")
+            
             for keyword in keywords:
                 for i in range(grid_size):
                     for j in range(grid_size):
@@ -180,7 +197,13 @@ class GooglePlacesHotelSearchView(APIView):
                                 for place in cached_results:
                                     pid = place.get('place_id') or place.get('id')
                                     if pid and pid not in places:
-                                        places[pid] = place
+                                        # Additional check to ensure cached results are within bounds
+                                        place_lat = place.get('location', {}).get('latitude')
+                                        place_lng = place.get('location', {}).get('longitude')
+                                        if (place_lat and place_lng and 
+                                            search_bounds['southwest']['lat'] <= place_lat <= search_bounds['northeast']['lat'] and
+                                            search_bounds['southwest']['lng'] <= place_lng <= search_bounds['northeast']['lng']):
+                                            places[pid] = place
                                 continue
                             offset_x = step_meters * (i - grid_size // 2)
                             offset_y = step_meters * (j - grid_size // 2)
@@ -190,7 +213,7 @@ class GooglePlacesHotelSearchView(APIView):
                             search_lng = lng + lng_offset
                             search_radius = int(step_meters * 0.7)
                             payload = {
-                                'textQuery': keyword,
+                                'textQuery': f"{keyword} near {lat},{lng}",
                                 'locationBias': {
                                     'circle': {
                                         'center': {
@@ -222,10 +245,24 @@ class GooglePlacesHotelSearchView(APIView):
                                     # Log and skip places without id
                                     print(f"Skipping place with missing id in response for keyword={keyword} cell={i},{j}: {place}")
                                     continue
-                                if place_id not in places:
-                                    formatted_place = self.format_place_data(place, None)
-                                    places[place_id] = formatted_place
-                                    cell_places.append(formatted_place)
+                                
+                                # Extract location data
+                                location = place.get('location', {})
+                                place_lat = location.get('latitude')
+                                place_lng = location.get('longitude')
+                                
+                                # Filter results to ensure they're within our search bounds
+                                if (place_lat and place_lng and 
+                                    search_bounds['southwest']['lat'] <= place_lat <= search_bounds['northeast']['lat'] and
+                                    search_bounds['southwest']['lng'] <= place_lng <= search_bounds['northeast']['lng']):
+                                    
+                                    if place_id not in places:
+                                        formatted_place = self.format_place_data(place, None)
+                                        places[place_id] = formatted_place
+                                        cell_places.append(formatted_place)
+                                else:
+                                    print(f"Skipping place outside search bounds: {place.get('displayName', {}).get('text', 'Unknown')} at {place_lat}, {place_lng}")
+                                    
                             try:
                                 cache.set(cache_key, cell_places, timeout=3600)
                             except Exception as ce:
@@ -254,8 +291,6 @@ class GooglePlacesHotelSearchView(APIView):
             print(f"perform_search error: {str(e)}")
             return {"error": str(e)}
 
-# ...existing code...
-
 # Add new endpoints after all base classes
 class AddressSearchAPI(GooglePlacesHotelSearchView):
     """Endpoint for searching by address and category."""
@@ -271,20 +306,55 @@ class AddressSearchAPI(GooglePlacesHotelSearchView):
         headers = {
             'Content-Type': 'application/json',
             'X-Goog-Api-Key': api_key,
-            'X-Goog-FieldMask': 'places.location,places.formattedAddress'
+            'X-Goog-FieldMask': 'places.location,places.formattedAddress,places.viewport'
         }
-        payload = {'textQuery': address}
+        # Improve the query to be more specific to India
+        text_query = f"{address}, India"
+        payload = {
+            'textQuery': text_query,
+            'regionCode': 'IN'
+        }
         data = self._make_request_with_retry(url=geocode_url, headers=headers, json=payload, method='post')
         if not data or 'places' not in data or not data['places']:
             return Response({'error': 'Address geocoding failed or no location found'}, status=status.HTTP_404_NOT_FOUND)
-        place = data['places'][0]
+        
+        # Try to find the most relevant result (prefer administrative areas)
+        place = None
+        for p in data["places"]:
+            types = p.get("types", [])
+            if "administrative_area_level_1" in types or "administrative_area_level_2" in types:
+                place = p
+                break
+        
+        # If no administrative area found, use the first result
+        if not place:
+            place = data['places'][0]
+            
         location = place.get('location', {})
         lat = location.get('latitude')
         lng = location.get('longitude')
         if lat is None or lng is None:
             return Response({'error': 'Failed to obtain coordinates from address'}, status=status.HTTP_404_NOT_FOUND)
+            
+        # Get viewport bounds if available
+        viewport = place.get('viewport', {})
+        if viewport and viewport.get('high') and viewport.get('low'):
+            # Calculate area size based on viewport
+            ne_lat = viewport['high']['latitude']
+            ne_lng = viewport['high']['longitude']
+            sw_lat = viewport['low']['latitude']
+            sw_lng = viewport['low']['longitude']
+            
+            # Calculate approximate area size in meters
+            lat_diff = abs(ne_lat - sw_lat) * 111320  # meters per degree
+            lng_diff = abs(ne_lng - sw_lng) * 111320 * math.cos(math.radians((ne_lat + sw_lat) / 2))
+            area_size_meters = max(lat_diff, lng_diff)
+        else:
+            # Default to 5000 meters
+            area_size_meters = 5000
+            
         area_size_param = request.query_params.get('area_size')
-        area_size_meters = int(area_size_param) if area_size_param else 5000
+        area_size_meters = int(area_size_param) if area_size_param else min(int(area_size_meters), 15000)  # Cap at 15km
         grid_size = int(request.query_params.get('grid_size', 3))
         overlap = float(request.query_params.get('overlap', 0.4))
         response_data = self.perform_search(lat=lat, lng=lng, category=category,
@@ -399,7 +469,7 @@ class ConsolidatedPlacesAPI(GooglePlacesHotelSearchView):
 class GoogleGeocodingView(APIView):
     def get(self, request):
         address = request.query_params.get('address')
-        region_code = request.query_params.get('region', 'in')  # Default to 'in' but allow override
+        region_code = request.query_params.get('region', 'IN')  # Default to 'IN' (India) but allow override
         
         if not address:
             return Response(
@@ -420,13 +490,15 @@ class GoogleGeocodingView(APIView):
             "X-Goog-Api-Key": api_key,
             "X-Goog-FieldMask": "places.formattedAddress,places.location,places.types,places.viewport"
         }
+        # Improve the query to be more specific to India
+        text_query = f"{address}, India"
         payload = {
-            "textQuery": address,
+            "textQuery": text_query,
             "regionCode": region_code  # Use configured region code
         }
 
         try:
-            print(f"Calling Places API for address: {address}")
+            print(f"Calling Places API for address: {text_query}")
             response = requests.post(url, headers=headers, json=payload, timeout=15)
             data = response.json()
             
@@ -439,7 +511,18 @@ class GoogleGeocodingView(APIView):
                     status=status.HTTP_404_NOT_FOUND
                 )
 
-            place = data["places"][0]
+            # Try to find the most relevant result (prefer administrative areas)
+            place = None
+            for p in data["places"]:
+                types = p.get("types", [])
+                if "administrative_area_level_1" in types or "administrative_area_level_2" in types:
+                    place = p
+                    break
+            
+            # If no administrative area found, use the first result
+            if not place:
+                place = data["places"][0]
+                
             location = place.get("location", {})
             
             # Use viewport for search area if available, otherwise use default
@@ -473,7 +556,7 @@ class GoogleGeocodingView(APIView):
 
             response_data = {
                 'results': [{
-                    'formatted_address': place.get("formattedAddress", address),
+                    'formatted_address': place.get("formattedAddress", text_query),
                     'geometry': {
                         'location': {
                             'lat': location["latitude"],
@@ -483,7 +566,7 @@ class GoogleGeocodingView(APIView):
                     },
                     'area_info': {
                         'type': place.get("types", ["UNKNOWN"])[0],
-                        'name': place.get("formattedAddress", address),
+                        'name': place.get("formattedAddress", text_query),
                         'grid_size': 3,  # Match backend default (3x3 grid)
                         'overlap': 0.4,  # Match backend default (40% overlap)
                         'area_size': area_size
