@@ -67,30 +67,40 @@ class GooglePlacesHotelSearchView(APIView):
                                            area_size_meters=area_size_meters, grid_size=grid_size, overlap=overlap)
         return Response(response_data)
 
-    def _make_request_with_retry(self, url: str, headers: Dict, json: Dict = None, method: str = 'get', max_retries: int = 1) -> Dict:
-        """Make a request with minimal retry for faster response on Render"""
+    def _make_request_with_retry(self, url: str, headers: Dict, json: Dict = None, method: str = 'get', max_retries: int = 3) -> Dict:
+        """Make a request with retry logic"""
         for attempt in range(max_retries):
             try:
                 if method.lower() == 'post':
-                    response = requests.post(url, headers=headers, json=json, timeout=8)
+                    response = requests.post(url, headers=headers, json=json, timeout=30)
                 else:
-                    response = requests.get(url, headers=headers, timeout=8)
+                    response = requests.get(url, headers=headers, timeout=30)
+                
+                # For 400 errors, this might be a bad request, but let's still try to handle it
                 if response.status_code == 400:
                     error_msg = f"Bad request for {url}"
                     if hasattr(response, 'text'):
                         error_msg += f"\nResponse: {response.text}"
                     print(error_msg)
-                    return {}
+                    # Don't return empty dict immediately, try to parse response
+                    try:
+                        return response.json()
+                    except:
+                        return {}
+                
                 response.raise_for_status()
                 return response.json()
-            except requests.RequestException as e:
-                if attempt == max_retries - 1:
-                    error_msg = f"Request failed after {max_retries} attempts for {url}: {str(e)}"
-                    print(error_msg)
+            except requests.exceptions.RequestException as e:
+                print(f"Request attempt {attempt + 1} failed: {str(e)}")
+                if attempt == max_retries - 1:  # Last attempt failed
+                    print(f"All {max_retries} attempts failed for {url}: {str(e)}")
                     return {}
-                if not hasattr(e, 'response') or (500 <= e.response.status_code < 600):
-                    continue
-                return {}
+                time.sleep(2 * (attempt + 1))  # Progressive delay
+            except Exception as e:
+                print(f"Unexpected error in request: {str(e)}")
+                if attempt == max_retries - 1:
+                    return {}
+                time.sleep(2 * (attempt + 1))
         return {}
 
     def format_place_data(self, place, details):
@@ -187,22 +197,19 @@ class GooglePlacesHotelSearchView(APIView):
             print(f"Search bounds: {search_bounds}")
             
             for keyword in keywords:
-                # Improve the search query by adding context
-                search_query = f"{keyword} in Odisha" if "odisha" in str(lat).lower() or "odisha" in str(lng).lower() else f"{keyword} near {lat},{lng}"
+                # Use simple keyword search - let Google Places API handle location context
+                search_query = keyword
                 
                 for i in range(grid_size):
                     for j in range(grid_size):
                         try:
+                            # TEMPORARILY DISABLE CACHE to ensure fresh API calls
                             # Build a memcache-safe key by hashing the raw composite key
                             raw_key_base = f'places_search_{lat}_{lng}_{area_size_meters}_{category}_{keyword}_{i}_{j}'
                             cache_key = 'ps_' + hashlib.sha1(raw_key_base.encode('utf-8')).hexdigest()
-                            cached_results = cache.get(cache_key)
-                            if cached_results:
-                                for place in cached_results:
-                                    pid = place.get('place_id') or place.get('id')
-                                    if pid and pid not in places:
-                                        places[pid] = place  # Don't filter cached results
-                                continue
+                            
+                            # Skip cache check for now
+                                
                             offset_x = step_meters * (i - grid_size // 2)
                             offset_y = step_meters * (j - grid_size // 2)
                             lat_offset = offset_lat(offset_y)
@@ -210,33 +217,56 @@ class GooglePlacesHotelSearchView(APIView):
                             search_lat = lat + lat_offset
                             search_lng = lng + lng_offset
                             search_radius = int(step_meters * 0.7)
-                            payload = {
-                                'textQuery': search_query,
-                                'locationBias': {
-                                    'circle': {
-                                        'center': {
-                                            'latitude': search_lat,
-                                            'longitude': search_lng
-                                        },
-                                        'radius': search_radius
-                                    }
+                            
+                            # Try different search approaches
+                            payloads = [
+                                {
+                                    'textQuery': search_query,
+                                    'locationBias': {
+                                        'circle': {
+                                            'center': {
+                                                'latitude': search_lat,
+                                                'longitude': search_lng
+                                            },
+                                            'radius': search_radius
+                                        }
+                                    },
+                                    'maxResultCount': max_results_per_cell
                                 },
-                                'maxResultCount': max_results_per_cell
-                            }
-                            print(f"Grid cell {i},{j}: Searching with query '{search_query}' at {search_lat},{search_lng}")
-                            data = self._make_request_with_retry(
-                                url=url,
-                                headers=search_headers,
-                                json=payload,
-                                method='post'
-                            )
+                                {
+                                    'textQuery': f"{keyword} near me",
+                                    'locationBias': {
+                                        'circle': {
+                                            'center': {
+                                                'latitude': search_lat,
+                                                'longitude': search_lng
+                                            },
+                                            'radius': search_radius
+                                        }
+                                    },
+                                    'maxResultCount': max_results_per_cell
+                                }
+                            ]
+                            
+                            data = None
+                            for payload in payloads:
+                                print(f"Grid cell {i},{j}: Searching with query '{payload['textQuery']}' at {search_lat},{search_lng}")
+                                data = self._make_request_with_retry(
+                                    url=url,
+                                    headers=search_headers,
+                                    json=payload,
+                                    method='post'
+                                )
+                                if data and 'places' in data and len(data['places']) > 0:
+                                    print(f"Got {len(data['places'])} results for grid cell {i},{j}")
+                                    break
+                                else:
+                                    print(f"No results for query '{payload['textQuery']}', trying next approach")
+                            
                             if not data or 'places' not in data:
-                                print(f"No data returned for grid cell {i},{j}")
-                                try:
-                                    cache.set(cache_key, [], timeout=3600)
-                                except Exception as ce:
-                                    print(f"Cache set failed for key {cache_key}: {ce}")
+                                print(f"No data returned for grid cell {i},{j} after all attempts")
                                 continue
+                                
                             cell_places = []
                             for place in data['places']:
                                 place_id = place.get('place_id') or place.get('id')
@@ -263,9 +293,8 @@ class GooglePlacesHotelSearchView(APIView):
                                         place_address = formatted_place.get('formatted_address', '').lower()
                                         keyword_lower = keyword.lower()
                                         
-                                        # Include if the place name or address contains the keyword or location hints
-                                        if (keyword_lower in place_name or keyword_lower in place_address or
-                                            'odisha' in place_name or 'odisha' in place_address):
+                                        # Include if the place name or address contains the keyword
+                                        if (keyword_lower in place_name or keyword_lower in place_address):
                                             print(f"Including place outside bounds: {formatted_place.get('name')}")
                                         else:
                                             # Skip places that are clearly outside the region and not relevant
@@ -274,13 +303,12 @@ class GooglePlacesHotelSearchView(APIView):
                                     places[place_id] = formatted_place
                                     cell_places.append(formatted_place)
                                     
-                            try:
-                                cache.set(cache_key, cell_places, timeout=3600)
-                            except Exception as ce:
-                                print(f"Cache set failed for key {cache_key}: {ce}")
                         except Exception as e:
                             print(f"Error in grid cell {i},{j} for keyword {keyword}: {str(e)}")
+                            import traceback
+                            traceback.print_exc()
                             continue
+            print(f"Total unique places found: {len(places)}")
             response_data = {
                 'results': list(places.values()),
                 'metadata': {
