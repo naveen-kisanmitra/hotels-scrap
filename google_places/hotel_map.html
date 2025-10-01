@@ -742,31 +742,77 @@
             `;
             
             if (hotels.length === 0) {
-                listDiv.innerHTML += '<p>No places found in this area.</p>';
+                listDiv.innerHTML += `
+                    <div style="text-align: center; padding: 20px;">
+                        <p>No places found in this area.</p>
+                        <p style="color: #666; font-size: 0.9em;">
+                            Try searching for a different category or increasing the search area.
+                        </p>
+                    </div>
+                `;
                 return;
+            }
+
+            // Count how many results are within bounds vs outside
+            let withinBoundsCount = 0;
+            hotels.forEach(hotel => {
+                if (hotel.within_search_bounds) {
+                    withinBoundsCount++;
+                }
+            });
+
+            if (withinBoundsCount < hotels.length) {
+                listDiv.innerHTML += `
+                    <div style="background: #fff3cd; padding: 10px; border-radius: 5px; margin-bottom: 15px; border: 1px solid #ffeaa7;">
+                        <strong>ℹ️ Note:</strong> Showing ${hotels.length} results (${withinBoundsCount} within search area, ${hotels.length - withinBoundsCount} from surrounding areas)
+                    </div>
+                `;
             }
 
             hotels.forEach((hotel, idx) => {
                 if (hotel.location && hotel.location.latitude && hotel.location.longitude) {
                     const marker = L.marker([hotel.location.latitude, hotel.location.longitude]).addTo(mapInstance);
-                    marker.bindPopup(
-                        `<b>${hotel.name || 'Unnamed Place'}</b><br>
+                    
+                    // Different popup content based on whether it's within bounds
+                    let popupContent = `
+                        <b>${hotel.name || 'Unnamed Place'}</b><br>
                         ${hotel.formatted_address || hotel.vicinity || 'Address not available'}<br>
-                        ${hotel.formatted_phone_number || hotel.international_phone_number ? `Phone: ${hotel.formatted_phone_number || hotel.international_phone_number}<br>` : ''}
-                        ${hotel.rating ? `Rating: ${hotel.rating} ⭐ (${hotel.user_ratings_total || 0} reviews)<br>` : ''}
+                    `;
+                    
+                    if (hotel.phone_number && hotel.phone_number !== 'Not available') {
+                        popupContent += `Phone: ${hotel.phone_number}<br>`;
+                    }
+                    
+                    if (hotel.rating) {
+                        popupContent += `Rating: ${hotel.rating} ⭐ (${hotel.user_ratings_total || 0} reviews)<br>`;
+                    }
+                    
+                    popupContent += `
                         <div style="margin-top: 5px;">
                             <strong>Place ID:</strong><br>
                             <code style="background: #f8f9fa; padding: 2px 4px; border-radius: 3px;">${hotel.place_id}</code>
-                        </div>`
-                    );
+                        </div>
+                    `;
+                    
+                    if (!hotel.within_search_bounds) {
+                        popupContent += `<br><small style="color: #ff6b6b;">⚠️ Outside search area</small>`;
+                    }
+                    
+                    marker.bindPopup(popupContent);
                     markers.push(marker);
                 }
 
                 const hotelDiv = document.createElement('div');
                 hotelDiv.className = 'hotel-item';
+                
+                // Add visual indicator if outside search bounds
+                const locationIndicator = hotel.within_search_bounds ? 
+                    '<span style="color: #28a745;">●</span>' : 
+                    '<span style="color: #ff6b6b;" title="Outside search area">●</span>';
+                    
                 hotelDiv.innerHTML = `
                     <div class="hotel-header">
-                        <h3>${idx + 1}. ${hotel.name}</h3>
+                        <h3>${idx + 1}. ${hotel.name} ${locationIndicator}</h3>
                         <span class="category-tag">${hotel.primary_type || 'PLACE'}</span>
                     </div>
                     <div class="hotel-details">
@@ -950,6 +996,7 @@
                             <div style="color: #dc3545;">❌ No results found</div>
                             <div>⏱️ Search time: ${searchTime} seconds</div>
                             <div>💡 Try increasing the radius or changing category</div>
+                            <div>🔍 Searched for: ${category} near ${params.latitude.toFixed(6)}, ${params.longitude.toFixed(6)}</div>
                         </div>
                     `;
                     await new Promise(resolve => setTimeout(resolve, 1500));
