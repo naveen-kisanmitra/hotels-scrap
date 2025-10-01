@@ -183,8 +183,6 @@ class GooglePlacesHotelSearchView(APIView):
                 }
             }
             
-            print(f"Search bounds: {search_bounds}")
-            
             for keyword in keywords:
                 for i in range(grid_size):
                     for j in range(grid_size):
@@ -213,7 +211,7 @@ class GooglePlacesHotelSearchView(APIView):
                             search_lng = lng + lng_offset
                             search_radius = int(step_meters * 0.7)
                             payload = {
-                                'textQuery': f"{keyword} near {lat},{lng}",
+                                'textQuery': f"{keyword}",
                                 'locationBias': {
                                     'circle': {
                                         'center': {
@@ -231,7 +229,6 @@ class GooglePlacesHotelSearchView(APIView):
                                 json=payload,
                                 method='post'
                             )
-                            print('DEBUG: Raw Google Places API response:', data)
                             if not data or 'places' not in data:
                                 try:
                                     cache.set(cache_key, [], timeout=3600)
@@ -260,8 +257,6 @@ class GooglePlacesHotelSearchView(APIView):
                                         formatted_place = self.format_place_data(place, None)
                                         places[place_id] = formatted_place
                                         cell_places.append(formatted_place)
-                                else:
-                                    print(f"Skipping place outside search bounds: {place.get('displayName', {}).get('text', 'Unknown')} at {place_lat}, {place_lng}")
                                     
                             try:
                                 cache.set(cache_key, cell_places, timeout=3600)
@@ -289,6 +284,8 @@ class GooglePlacesHotelSearchView(APIView):
             return response_data
         except Exception as e:
             print(f"perform_search error: {str(e)}")
+            import traceback
+            traceback.print_exc()
             return {"error": str(e)}
 
 # Add new endpoints after all base classes
@@ -498,12 +495,8 @@ class GoogleGeocodingView(APIView):
         }
 
         try:
-            print(f"Calling Places API for address: {text_query}")
             response = requests.post(url, headers=headers, json=payload, timeout=15)
             data = response.json()
-            
-            print(f"Places API response status: {response.status_code}")
-            print(f"Places API response: {data}")
             
             if "places" not in data or not data["places"]:
                 return Response(
