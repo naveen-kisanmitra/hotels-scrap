@@ -97,10 +97,26 @@ class GooglePlacesHotelSearchView(APIView):
         full_address = place.get('formattedAddress', '')
         # Get phone number from details (use formatted_phone_number or international_phone_number)
         phone_number = None
+        # Log all available phone number fields for debugging
         if details:
-            phone_number = details.get('formatted_phone_number') or details.get('international_phone_number')
-            if phone_number:
-                print(f"Setting phone number in format_place_data: {phone_number}")
+            print(f"Available phone fields in details: {[k for k in details.keys() if 'phone' in k.lower()]}")
+            # Try all possible phone number fields from details
+            phone_number = (details.get('formatted_phone_number') or 
+                          details.get('international_phone_number') or
+                          details.get('formattedPhoneNumber') or
+                          details.get('internationalPhoneNumber') or
+                          details.get('nationalPhoneNumber'))
+        # If no phone in details, try from place data
+        if place:
+            print(f"Available phone fields in place: {[k for k in place.keys() if 'phone' in k.lower()]}")
+            if not phone_number:
+                phone_number = (place.get('formattedPhoneNumber') or
+                              place.get('internationalPhoneNumber') or
+                              place.get('nationalPhoneNumber'))
+        if phone_number:
+            print(f"Setting phone number in format_place_data: {phone_number}")
+        else:
+            print("No phone number found in either place details or place data")
         weekday_texts = details.get('currentOpeningHours', {}).get('weekdayDescriptions') if details else None
         current_opening_hours = details.get('currentOpeningHours', {}) if details else None
         is_open = current_opening_hours.get('openNow') if current_opening_hours else None
@@ -142,13 +158,15 @@ class GooglePlacesHotelSearchView(APIView):
             url = 'https://maps.googleapis.com/maps/api/place/details/json'
             params = {
                 'place_id': place_id,
-                'fields': 'formatted_phone_number,international_phone_number,formatted_address',
+                'fields': 'formatted_phone_number,international_phone_number,formatted_address,nationalPhoneNumber,formattedPhoneNumber,internationalPhoneNumber,phoneNumber,contacts',
                 'key': os.getenv('GOOGLE_PLACES_API_KEY')
             }
             try:
+                print(f"Fetching place details for place_id: {place_id}")
                 resp = requests.get(url, params=params, timeout=8)
                 resp.raise_for_status()
                 j = resp.json()
+                print(f"Place details response for {place_id}: {j}")
             except requests.RequestException as re:
                 print(f"Place details request failed for {place_id}: {re}")
                 return {}
@@ -207,7 +225,7 @@ class GooglePlacesHotelSearchView(APIView):
                 'X-Goog-FieldMask': 'places.id,places.displayName,places.formattedAddress,places.location,'
                                   'places.rating,places.userRatingCount,places.types,places.nationalPhoneNumber,'
                                   'places.websiteUri,places.priceLevel,places.businessStatus,places.shortFormattedAddress,'
-                                  'places.currentOpeningHours'
+                                  'places.currentOpeningHours,places.formattedPhoneNumber,places.internationalPhoneNumber'
             }
             
             # Calculate search bounds for filtering results (expand by 50% to be more inclusive)
