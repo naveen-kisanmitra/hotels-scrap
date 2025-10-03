@@ -173,10 +173,86 @@ class GooglePlacesHotelSearchView(APIView):
     def _sanitize_category(self, category: str) -> str:
         """Clean incoming category strings and provide a safe default."""
         if not category:
+            print("No category provided, using default: 'hotels'")
             return 'hotels'
-        cat = str(category).strip()
+        # Remove any unsafe characters and normalize
+        cat = str(category).strip().lower()
         cat = cat.strip(';=').strip()
-        return cat or 'hotels'
+        print(f"Normalizing category: '{category}' -> '{cat}'")
+        # Map common variations to standard terms
+        # Map of frontend dropdown values to standardized search terms
+        category_map = {
+            # Accommodation
+            'hotel': 'hotels',
+            'hotels': 'hotels',
+            'resort': 'resorts',
+            'resorts': 'resorts',
+            'lodge': 'lodges',
+            'lodges': 'lodges',
+            'motel': 'motels',
+            'motels': 'motels',
+            'guest house': 'guest houses',
+            'guesthouse': 'guest houses',
+            
+            # Food & Dining
+            'restaurant': 'restaurants',
+            'restaurants': 'restaurants',
+            'cafe': 'cafes',
+            'cafes': 'cafes',
+            'coffee shop': 'coffee shops',
+            'coffee': 'coffee shops',
+            'food': 'restaurants',
+            'dining': 'restaurants',
+            
+            # Shopping & Retail
+            'shop': 'shops',
+            'shops': 'shops',
+            'store': 'stores',
+            'stores': 'stores',
+            'mall': 'shopping malls',
+            'malls': 'shopping malls',
+            'market': 'markets',
+            'markets': 'markets',
+            'supermarket': 'supermarkets',
+            
+            # Entertainment
+            'movie': 'movie theaters',
+            'cinema': 'movie theaters',
+            'theater': 'theaters',
+            'theatre': 'theaters',
+            'park': 'parks',
+            'parks': 'parks',
+            'museum': 'museums',
+            'museums': 'museums',
+            
+            # Transportation
+            'airport': 'airports',
+            'station': 'train stations',
+            'bus station': 'bus stations',
+            'metro': 'metro stations',
+            
+            # Medical
+            'hospital': 'hospitals',
+            'clinic': 'clinics',
+            'pharmacy': 'pharmacies',
+            'medical': 'medical centers',
+            
+            # Education
+            'school': 'schools',
+            'college': 'colleges',
+            'university': 'universities',
+            'library': 'libraries',
+            
+            # Services
+            'bank': 'banks',
+            'atm': 'atms',
+            'post office': 'post offices',
+            'police': 'police stations'
+        }
+        mapped_cat = category_map.get(cat, cat) or 'hotels'
+        if mapped_cat != cat:
+            print(f"Mapped category '{cat}' to standardized term '{mapped_cat}'")
+        return mapped_cat
 
     def _get_category_from_request(self, request) -> str:
         """Robustly extract category from query params. Handles malformed keys like 'category;'."""
@@ -209,7 +285,7 @@ class GooglePlacesHotelSearchView(APIView):
             search_headers = {
                 'Content-Type': 'application/json',
                 'X-Goog-Api-Key': api_key,
-                'X-Goog-FieldMask': 'places.id,places.displayName,places.formattedAddress,places.location,places.rating,places.userRatingCount,places.types,places.nationalPhoneNumber,places.websiteUri,places.priceLevel,places.businessStatus,places.shortFormattedAddress,places.currentOpeningHours'
+                'X-Goog-FieldMask': 'places.id,places.displayName,places.formattedAddress,places.location,places.rating,places.userRatingCount,places.types,places.nationalPhoneNumber,places.websiteUri,places.priceLevel,places.businessStatus,places.shortFormattedAddress,places.currentOpeningHours,places.editorialSummary'
             }
             
             # Calculate search bounds for filtering results (expand by 50% to be more inclusive)
@@ -229,8 +305,8 @@ class GooglePlacesHotelSearchView(APIView):
             }
             
             for keyword in keywords:
-                # Improve the search query by adding location context
-                search_query = f"{keyword} near {lat},{lng}"
+                # Keep the search query focused on the keyword/category
+                search_query = keyword
                 
                 for i in range(grid_size):
                     for j in range(grid_size):
@@ -269,14 +345,23 @@ class GooglePlacesHotelSearchView(APIView):
                                         'radius': search_radius
                                     }
                                 },
-                                'maxResultCount': max_results_per_cell
+                                'maxResultCount': max_results_per_cell,
+                                'regionCode': 'IN',
+                                'languageCode': 'en'
                             }
+                            print(f"Searching for {search_query} in cell {i},{j}")
                             data = self._make_request_with_retry(
                                 url=url,
                                 headers=search_headers,
                                 json=payload,
                                 method='post'
                             )
+                            if not data:
+                                print(f"No data returned for search: {search_query} in cell {i},{j}")
+                            elif 'places' not in data:
+                                print(f"No places found for search: {search_query} in cell {i},{j}")
+                            else:
+                                print(f"Found {len(data['places'])} places for {search_query} in cell {i},{j}")
                             if not data or 'places' not in data:
                                 try:
                                     cache.set(cache_key, [], timeout=3600)
