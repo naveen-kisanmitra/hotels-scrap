@@ -67,45 +67,40 @@ class GooglePlacesHotelSearchView(APIView):
                                            area_size_meters=area_size_meters, grid_size=grid_size, overlap=overlap)
         return Response(response_data)
 
-    def _make_request_with_retry(self, url: str, headers: Dict, json: Dict = None, method: str = 'get', max_retries: int = 3) -> Dict:
-        """Make a request with retry logic"""
+    def _make_request_with_retry(self, url: str, headers: Dict, json: Dict = None, method: str = 'get', max_retries: int = 1) -> Dict:
+        """Make a request with minimal retry for faster response on Render"""
         for attempt in range(max_retries):
             try:
                 if method.lower() == 'post':
-                    response = requests.post(url, headers=headers, json=json, timeout=30)
+                    response = requests.post(url, headers=headers, json=json, timeout=8)
                 else:
-                    response = requests.get(url, headers=headers, timeout=30)
-                
-                # For 400 errors, this might be a bad request, but let's still try to handle it
+                    response = requests.get(url, headers=headers, timeout=8)
                 if response.status_code == 400:
                     error_msg = f"Bad request for {url}"
                     if hasattr(response, 'text'):
                         error_msg += f"\nResponse: {response.text}"
                     print(error_msg)
-                    # Don't return empty dict immediately, try to parse response
-                    try:
-                        return response.json()
-                    except:
-                        return {}
-                
+                    return {}
                 response.raise_for_status()
                 return response.json()
-            except requests.exceptions.RequestException as e:
-                print(f"Request attempt {attempt + 1} failed: {str(e)}")
-                if attempt == max_retries - 1:  # Last attempt failed
-                    print(f"All {max_retries} attempts failed for {url}: {str(e)}")
-                    return {}
-                time.sleep(2 * (attempt + 1))  # Progressive delay
-            except Exception as e:
-                print(f"Unexpected error in request: {str(e)}")
+            except requests.RequestException as e:
                 if attempt == max_retries - 1:
+                    error_msg = f"Request failed after {max_retries} attempts for {url}: {str(e)}"
+                    print(error_msg)
                     return {}
-                time.sleep(2 * (attempt + 1))
+                if not hasattr(e, 'response') or (500 <= e.response.status_code < 600):
+                    continue
+                return {}
         return {}
 
     def format_place_data(self, place, details):
         full_address = place.get('formattedAddress', '')
-        phone_number = details.get('nationalPhoneNumber') if details else None
+        # Get phone number from details (use formatted_phone_number or international_phone_number)
+        phone_number = None
+        if details:
+            phone_number = details.get('formatted_phone_number') or details.get('international_phone_number')
+            if phone_number:
+                print(f"Setting phone number in format_place_data: {phone_number}")
         weekday_texts = details.get('currentOpeningHours', {}).get('weekdayDescriptions') if details else None
         current_opening_hours = details.get('currentOpeningHours', {}) if details else None
         is_open = current_opening_hours.get('openNow') if current_opening_hours else None
@@ -131,6 +126,44 @@ class GooglePlacesHotelSearchView(APIView):
             'short_address': place.get('shortFormattedAddress', full_address).split(',')[0],
             'has_phone': bool(phone_number)
         }
+
+    def _get_place_details(self, place_id: str, ttl: int = 24 * 3600) -> Dict:
+        """Fetch place details (phone numbers, website, formatted address) and cache them.
+        Uses the classic Places Details JSON endpoint and caches result by hashed key.
+        """
+        if not place_id:
+            return {}
+        try:
+            cache_key = 'pd_' + hashlib.sha1(str(place_id).encode('utf-8')).hexdigest()
+            cached = cache.get(cache_key)
+            if cached is not None:
+                return cached
+            # Use Maps Place Details API (JSON) which is widely supported
+            url = 'https://maps.googleapis.com/maps/api/place/details/json'
+            params = {
+                'place_id': place_id,
+                'fields': 'formatted_phone_number,international_phone_number,formatted_address',
+                'key': os.getenv('GOOGLE_PLACES_API_KEY')
+            }
+            try:
+                resp = requests.get(url, params=params, timeout=8)
+                resp.raise_for_status()
+                j = resp.json()
+            except requests.RequestException as re:
+                print(f"Place details request failed for {place_id}: {re}")
+                return {}
+            result = j.get('result') or {}
+            # Log when we successfully get a phone number
+            if result.get('formatted_phone_number') or result.get('international_phone_number'):
+                print(f"Found phone number for place {place_id}")
+            try:
+                cache.set(cache_key, result, timeout=ttl)
+            except Exception as ce:
+                print(f"Failed to cache place details for {place_id}: {ce}")
+            return result
+        except Exception as e:
+            print(f"_get_place_details error for {place_id}: {e}")
+            return {}
 
     def _sanitize_category(self, category: str) -> str:
         """Clean incoming category strings and provide a safe default."""
@@ -177,10 +210,10 @@ class GooglePlacesHotelSearchView(APIView):
                                   'places.currentOpeningHours'
             }
             
-            # Calculate search bounds for filtering results (much more lenient)
-            half_area_km = area_size_meters / 1000  # Convert to km
-            lat_delta = half_area_km / 111.32 * 2  # Double the range to be more inclusive
-            lng_delta = half_area_km / (111.32 * math.cos(math.radians(lat))) * 2  # Double the range
+            # Calculate search bounds for filtering results (expand by 50% to be more inclusive)
+            half_area_km = area_size_meters / 2000 * 1.5  # Convert to km, divide by 2, and expand by 50%
+            lat_delta = half_area_km / 111.32  # Approximate km to lat degrees
+            lng_delta = half_area_km / (111.32 * math.cos(math.radians(lat)))  # Adjust for longitude
             
             search_bounds = {
                 'northeast': {
@@ -193,23 +226,29 @@ class GooglePlacesHotelSearchView(APIView):
                 }
             }
             
-            print(f"Searching for {category} near {lat}, {lng}")
-            print(f"Search bounds: {search_bounds}")
-            
             for keyword in keywords:
-                # Use simple keyword search - let Google Places API handle location context
-                search_query = keyword
+                # Improve the search query by adding location context
+                search_query = f"{keyword} near {lat},{lng}"
                 
                 for i in range(grid_size):
                     for j in range(grid_size):
                         try:
-                            # TEMPORARILY DISABLE CACHE to ensure fresh API calls
                             # Build a memcache-safe key by hashing the raw composite key
                             raw_key_base = f'places_search_{lat}_{lng}_{area_size_meters}_{category}_{keyword}_{i}_{j}'
                             cache_key = 'ps_' + hashlib.sha1(raw_key_base.encode('utf-8')).hexdigest()
-                            
-                            # Skip cache check for now
-                                
+                            cached_results = cache.get(cache_key)
+                            if cached_results:
+                                for place in cached_results:
+                                    pid = place.get('place_id') or place.get('id')
+                                    if pid and pid not in places:
+                                        # Additional check to ensure cached results are within bounds
+                                        place_lat = place.get('location', {}).get('latitude')
+                                        place_lng = place.get('location', {}).get('longitude')
+                                        if (place_lat and place_lng and 
+                                            search_bounds['southwest']['lat'] <= place_lat <= search_bounds['northeast']['lat'] and
+                                            search_bounds['southwest']['lng'] <= place_lng <= search_bounds['northeast']['lng']):
+                                            places[pid] = place
+                                continue
                             offset_x = step_meters * (i - grid_size // 2)
                             offset_y = step_meters * (j - grid_size // 2)
                             lat_offset = offset_lat(offset_y)
@@ -217,60 +256,37 @@ class GooglePlacesHotelSearchView(APIView):
                             search_lat = lat + lat_offset
                             search_lng = lng + lng_offset
                             search_radius = int(step_meters * 0.7)
-                            
-                            # Try different search approaches
-                            payloads = [
-                                {
-                                    'textQuery': search_query,
-                                    'locationBias': {
-                                        'circle': {
-                                            'center': {
-                                                'latitude': search_lat,
-                                                'longitude': search_lng
-                                            },
-                                            'radius': search_radius
-                                        }
-                                    },
-                                    'maxResultCount': max_results_per_cell
+                            payload = {
+                                'textQuery': search_query,
+                                'locationBias': {
+                                    'circle': {
+                                        'center': {
+                                            'latitude': search_lat,
+                                            'longitude': search_lng
+                                        },
+                                        'radius': search_radius
+                                    }
                                 },
-                                {
-                                    'textQuery': f"{keyword} near me",
-                                    'locationBias': {
-                                        'circle': {
-                                            'center': {
-                                                'latitude': search_lat,
-                                                'longitude': search_lng
-                                            },
-                                            'radius': search_radius
-                                        }
-                                    },
-                                    'maxResultCount': max_results_per_cell
-                                }
-                            ]
-                            
-                            data = None
-                            for payload in payloads:
-                                print(f"Grid cell {i},{j}: Searching with query '{payload['textQuery']}' at {search_lat},{search_lng}")
-                                data = self._make_request_with_retry(
-                                    url=url,
-                                    headers=search_headers,
-                                    json=payload,
-                                    method='post'
-                                )
-                                if data and 'places' in data and len(data['places']) > 0:
-                                    print(f"Got {len(data['places'])} results for grid cell {i},{j}")
-                                    break
-                                else:
-                                    print(f"No results for query '{payload['textQuery']}', trying next approach")
-                            
+                                'maxResultCount': max_results_per_cell
+                            }
+                            data = self._make_request_with_retry(
+                                url=url,
+                                headers=search_headers,
+                                json=payload,
+                                method='post'
+                            )
                             if not data or 'places' not in data:
-                                print(f"No data returned for grid cell {i},{j} after all attempts")
+                                try:
+                                    cache.set(cache_key, [], timeout=3600)
+                                except Exception as ce:
+                                    print(f"Cache set failed for key {cache_key}: {ce}")
                                 continue
-                                
                             cell_places = []
                             for place in data['places']:
                                 place_id = place.get('place_id') or place.get('id')
                                 if not place_id:
+                                    # Log and skip places without id
+                                    print(f"Skipping place with missing id in response for keyword={keyword} cell={i},{j}: {place}")
                                     continue
                                 
                                 # Extract location data
@@ -278,37 +294,39 @@ class GooglePlacesHotelSearchView(APIView):
                                 place_lat = location.get('latitude')
                                 place_lng = location.get('longitude')
                                 
-                                # Always include places, but mark if they're outside bounds
-                                if place_id not in places:
-                                    formatted_place = self.format_place_data(place, None)
-                                    # Add a field to indicate if the place is within bounds
-                                    if (place_lat and place_lng and 
-                                        search_bounds['southwest']['lat'] <= place_lat <= search_bounds['northeast']['lat'] and
-                                        search_bounds['southwest']['lng'] <= place_lng <= search_bounds['northeast']['lng']):
-                                        formatted_place['within_search_bounds'] = True
-                                    else:
-                                        formatted_place['within_search_bounds'] = False
-                                        # For places outside bounds, still include them if they seem relevant
-                                        place_name = formatted_place.get('name', '').lower()
-                                        place_address = formatted_place.get('formatted_address', '').lower()
-                                        keyword_lower = keyword.lower()
-                                        
-                                        # Include if the place name or address contains the keyword
-                                        if (keyword_lower in place_name or keyword_lower in place_address):
-                                            print(f"Including place outside bounds: {formatted_place.get('name')}")
-                                        else:
-                                            # Skip places that are clearly outside the region and not relevant
-                                            continue
+                                # Filter results to ensure they're within our search bounds
+                                # But be more lenient - allow some results outside bounds if they're relevant
+                                if (place_lat and place_lng and 
+                                    search_bounds['southwest']['lat'] <= place_lat <= search_bounds['northeast']['lat'] and
+                                    search_bounds['southwest']['lng'] <= place_lng <= search_bounds['northeast']['lng']):
                                     
+                                    if place_id not in places:
+                                        details = self._get_place_details(place_id)
+                                        formatted_place = self.format_place_data(place, details)
+                                        phone_from_details = details.get('formatted_phone_number') or details.get('international_phone_number')
+                                        if phone_from_details:
+                                            formatted_place['phone_number'] = phone_from_details
+                                            formatted_place['has_phone'] = True
+                                        places[place_id] = formatted_place
+                                        cell_places.append(formatted_place)
+                                elif place_id not in places:
+                                    # For places without clear location data, include them with a warning
+                                    details = self._get_place_details(place_id)
+                                    formatted_place = self.format_place_data(place, details)
+                                    phone_from_details = details.get('formatted_phone_number') or details.get('international_phone_number')
+                                    if phone_from_details:
+                                        formatted_place['phone_number'] = phone_from_details
+                                        formatted_place['has_phone'] = True
                                     places[place_id] = formatted_place
                                     cell_places.append(formatted_place)
                                     
+                            try:
+                                cache.set(cache_key, cell_places, timeout=3600)
+                            except Exception as ce:
+                                print(f"Cache set failed for key {cache_key}: {ce}")
                         except Exception as e:
                             print(f"Error in grid cell {i},{j} for keyword {keyword}: {str(e)}")
-                            import traceback
-                            traceback.print_exc()
                             continue
-            print(f"Total unique places found: {len(places)}")
             response_data = {
                 'results': list(places.values()),
                 'metadata': {
@@ -590,21 +608,21 @@ class GoogleGeocodingView(APIView):
                 # Calculate approximate area size in meters
                 lat_diff = abs(ne_lat - sw_lat) * 111320  # meters per degree
                 lng_diff = abs(ne_lng - sw_lng) * 111320 * math.cos(math.radians((ne_lat + sw_lat) / 2))
-                area_size = min(max(lat_diff, lng_diff), 100000)  # Cap at 100km but ensure minimum reasonable size
+                area_size = min(max(lat_diff, lng_diff), 50000)  # Cap at 50km but ensure minimum reasonable size
                 # If area is too small, use a default
-                if area_size < 10000:
-                    area_size = 25000  # 25km default for reasonable search
+                if area_size < 5000:
+                    area_size = 15000  # 15km default for reasonable search
             else:
-                # Default search area (25km radius for better coverage)
-                area_size = 25000
+                # Default search area (15km radius for better coverage)
+                area_size = 15000
                 bounds = {
                     'northeast': {
-                        'lat': location["latitude"] + 0.225,  # Approximately 25km
-                        'lng': location["longitude"] + 0.225
+                        'lat': location["latitude"] + 0.135,  # Approximately 15km
+                        'lng': location["longitude"] + 0.135
                     },
                     'southwest': {
-                        'lat': location["latitude"] - 0.225,
-                        'lng': location["longitude"] - 0.225
+                        'lat': location["latitude"] - 0.135,
+                        'lng': location["longitude"] - 0.135
                     }
                 }
 
@@ -623,7 +641,7 @@ class GoogleGeocodingView(APIView):
                         'name': place.get("formattedAddress", text_query),
                         'grid_size': 3,  # Match backend default (3x3 grid)
                         'overlap': 0.4,  # Match backend default (40% overlap)
-                        'area_size': int(area_size)
+                        'area_size': area_size
                     }
                 }]
             }
