@@ -98,17 +98,12 @@ class GooglePlacesHotelSearchView(APIView):
         # Get phone number from details (use formatted_phone_number or international_phone_number)
         phone_number = None
         if details:
-            # Try all possible phone number fields from details
-            phone_number = (details.get('formatted_phone_number') or 
-                          details.get('international_phone_number') or
-                          details.get('formattedPhoneNumber') or
-                          details.get('internationalPhoneNumber') or
-                          details.get('nationalPhoneNumber'))
+                # Try both phone number fields from details
+            phone_number = details.get('formatted_phone_number') or details.get('international_phone_number')
+            
         # If no phone in details, try from place data
         if not phone_number and place:
-            phone_number = (place.get('formattedPhoneNumber') or
-                          place.get('internationalPhoneNumber') or
-                          place.get('nationalPhoneNumber'))
+            phone_number = place.get('nationalPhoneNumber')
         if phone_number:
             print(f"Setting phone number in format_place_data: {phone_number}")
         weekday_texts = details.get('currentOpeningHours', {}).get('weekdayDescriptions') if details else None
@@ -152,7 +147,7 @@ class GooglePlacesHotelSearchView(APIView):
             url = 'https://maps.googleapis.com/maps/api/place/details/json'
             params = {
                 'place_id': place_id,
-                'fields': 'formatted_phone_number,international_phone_number,formatted_address,nationalPhoneNumber,formattedPhoneNumber,internationalPhoneNumber',
+                'fields': 'formatted_phone_number,international_phone_number,formatted_address',
                 'key': os.getenv('GOOGLE_PLACES_API_KEY')
             }
             try:
@@ -214,10 +209,7 @@ class GooglePlacesHotelSearchView(APIView):
             search_headers = {
                 'Content-Type': 'application/json',
                 'X-Goog-Api-Key': api_key,
-                'X-Goog-FieldMask': 'places.id,places.displayName,places.formattedAddress,places.location,'
-                                  'places.rating,places.userRatingCount,places.types,places.nationalPhoneNumber,'
-                                  'places.websiteUri,places.priceLevel,places.businessStatus,places.shortFormattedAddress,'
-                                  'places.currentOpeningHours,places.formattedPhoneNumber,places.internationalPhoneNumber'
+                'X-Goog-FieldMask': 'places.id,places.displayName,places.formattedAddress,places.location,places.rating,places.userRatingCount,places.types,places.nationalPhoneNumber,places.websiteUri,places.priceLevel,places.businessStatus,places.shortFormattedAddress,places.currentOpeningHours'
             }
             
             # Calculate search bounds for filtering results (expand by 50% to be more inclusive)
